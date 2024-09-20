@@ -43,6 +43,7 @@ app.get('/create-game', (req, res) => {
   const width = 10;
   const height = 10;
   const mineCount = 10;
+  const mode = req.query.mode === 'single' ? 'single' : 'multi';
   rooms.set(uuid, {
     shortId,
     players: [],
@@ -51,43 +52,49 @@ app.get('/create-game', (req, res) => {
     currentTurn: 0,
     width,
     height,
-    mineCount
+    mineCount,
+    mode
   });
   res.json({ roomId: shortId });
 });
 
 io.on('connection', (socket) => {
-  console.log('Yeni kullanıcı bağlandı');
+  console.log('New user connected');
 
   socket.on('joinRoom', (shortId) => {
     const uuid = shortIdToUuid.get(shortId);
     const room = rooms.get(uuid);
-    if (room && room.players.length < 2) {
-      const playerIndex = room.players.length;
-      room.players.push({ id: socket.id, index: playerIndex });
-      socket.join(uuid);
-      
-      socket.emit('gameState', {
-        board: room.board,
-        currentTurn: room.currentTurn,
-        playerIndex: playerIndex,
-        shortId: room.shortId,
-        width: room.width,
-        height: room.height,
-        mineCount: room.mineCount
-      });
-
-      if (room.players.length === 2) {
-        io.to(uuid).emit('gameStart', {
+    if (room) {
+      if (room.mode === 'single' || (room.mode === 'multi' && room.players.length < 2)) {
+        const playerIndex = room.players.length;
+        room.players.push({ id: socket.id, index: playerIndex });
+        socket.join(uuid);
+        
+        socket.emit('gameState', {
           board: room.board,
           currentTurn: room.currentTurn,
+          playerIndex: playerIndex,
+          shortId: room.shortId,
           width: room.width,
           height: room.height,
-          mineCount: room.mineCount
+          mineCount: room.mineCount,
+          mode: room.mode
         });
+
+        if (room.mode === 'multi' && room.players.length === 2) {
+          io.to(uuid).emit('gameStart', {
+            board: room.board,
+            currentTurn: room.currentTurn,
+            width: room.width,
+            height: room.height,
+            mineCount: room.mineCount
+          });
+        }
+      } else {
+        socket.emit('roomFull');
       }
     } else {
-      socket.emit('roomFull');
+      socket.emit('roomNotFound');
     }
   });
 
@@ -111,31 +118,33 @@ io.on('connection', (socket) => {
   socket.on('move', ({ shortId, x, y }) => {
     const uuid = shortIdToUuid.get(shortId);
     const room = rooms.get(uuid);
-    if (room && room.players[room.currentTurn].id === socket.id) {
-      console.log(`Hamle yapıldı: Oda ${shortId}, Oyuncu ${room.currentTurn}, x: ${x}, y: ${y}`);
+    if (room && (room.mode === 'single' || (room.mode === 'multi' && room.players[room.currentTurn].id === socket.id))) {
+      console.log(`Move made: Room ${shortId}, Player ${room.currentTurn}, x: ${x}, y: ${y}`);
       const result = revealCell(room, x, y);
       if (result === 'mine') {
         io.to(uuid).emit('gameOver', {
           result: 'mine',
           loser: room.currentTurn,
-          winner: (room.currentTurn + 1) % 2
+          winner: room.mode === 'multi' ? (room.currentTurn + 1) % 2 : null
         });
       } else if (result === 'game end') {
         io.to(uuid).emit('gameOver', { result: 'draw' });
       } else {
-        room.currentTurn = (room.currentTurn + 1) % 2;
+        if (room.mode === 'multi') {
+          room.currentTurn = (room.currentTurn + 1) % 2;
+        }
         io.to(uuid).emit('updateBoard', {
           board: room.board,
           currentTurn: room.currentTurn
         });
       }
     } else {
-      console.log(`Geçersiz hamle: Oda ${shortId}, Oyuncu ${socket.id}, Mevcut sıra: ${room ? room.currentTurn : 'Oda bulunamadı'}`);
+      console.log(`Invalid move: Room ${shortId}, Player ${socket.id}, Current turn: ${room ? room.currentTurn : 'Room not found'}`);
     }
   });
 
   socket.on('disconnect', () => {
-    // Oyuncuyu odadan çıkarma mantığı
+    // Handle player leaving the room logic
   });
 
   socket.on('setDifficulty', ({ shortId, width, height, mineCount }) => {
@@ -246,5 +255,5 @@ function countAdjacentMines(room, x, y) {
 }
 
 server.listen(PORT, () => {
-  console.log(`Server ${PORT} portunda çalışıyor`);
+  console.log(`Server running on port ${PORT}`);
 });
